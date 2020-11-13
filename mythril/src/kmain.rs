@@ -86,10 +86,8 @@ fn default_vm(
     device_map
         .register_device(virtdev::rtc::CmosRtc::new(mem))
         .unwrap();
-
-    //TODO: this should actually be per-vcpu
     device_map
-        .register_device(virtdev::lapic::LocalApic::new())
+        .register_device(virtdev::ioapic::IoApic::new())
         .unwrap();
 
     let mut fw_cfg_builder = virtdev::qemu_fw_cfg::QemuFwCfgBuilder::new();
@@ -113,9 +111,9 @@ fn default_vm(
         "kernel",
         "initramfs",
         core::concat!(
-            "rodata=0 nopti disableapic acpi=off ",
+            "rodata=0 nopti acpi=off ",
             "earlyprintk=serial,0x3f8,115200 ",
-            "console=ttyS0 debug nokaslr noapic mitigations=off ",
+            "console=ttyS0 debug nokaslr mitigations=off ",
             "root=/dev/ram0 rdinit=/bin/sh\0"
         )
         .as_bytes(),
