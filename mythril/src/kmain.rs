@@ -29,7 +29,7 @@ extern "C" {
 
 // Temporary helper function to create a vm for a single core
 fn default_vm(
-    core: percore::CoreId,
+    cores: Vec<percore::CoreId>,
     mem: u64,
     info: &BootInfo,
     add_uart: bool,
@@ -46,8 +46,9 @@ fn default_vm(
         }
     };
 
-    let mut config =
-        vm::VirtualMachineConfig::new(vec![core], mem, physical_config);
+    let vm_id = cores[0].raw;
+
+    let mut config = vm::VirtualMachineConfig::new(cores, mem, physical_config);
 
     let device_map = config.virtual_devices_mut();
     device_map
@@ -124,13 +125,15 @@ fn default_vm(
     .unwrap();
     device_map.register_device(fw_cfg_builder.build()).unwrap();
 
-    vm::VirtualMachine::new(core.raw, config, info)
-        .expect("Failed to create vm")
+    vm::VirtualMachine::new(vm_id, config, info).expect("Failed to create vm")
 }
 
 #[no_mangle]
-pub extern "C" fn ap_entry(_ap_data: &ap::ApData) -> ! {
-    unsafe { interrupt::idt::ap_init() };
+pub extern "C" fn ap_entry(ap_data: &ap::ApData) -> ! {
+    unsafe {
+        percore::init_segment_for_core(ap_data.idx);
+        interrupt::idt::ap_init()
+    };
 
     let local_apic =
         apic::LocalApic::init().expect("Failed to initialize local APIC");
@@ -141,8 +144,6 @@ pub extern "C" fn ap_entry(_ap_data: &ap::ApData) -> ! {
         local_apic.raw_base(),
         local_apic.version()
     );
-
-    unsafe { interrupt::enable_interrupts() };
 
     vcpu::mp_entry_point()
 }
@@ -181,10 +182,6 @@ unsafe fn kmain(mut boot_info: BootInfo) -> ! {
         .rsdt()
         .expect("Failed to read RSDT");
 
-    // Initialize the BSP local APIC
-    let local_apic =
-        apic::LocalApic::init().expect("Failed to initialize local APIC");
-
     let madt_sdt = rsdt.find_entry(b"APIC").expect("No MADT found");
     let madt = acpi::madt::MADT::new(&madt_sdt);
 
@@ -200,22 +197,31 @@ unsafe fn kmain(mut boot_info: BootInfo) -> ! {
         })
         .collect::<Vec<_>>();
 
+    percore::init_sections(apic_ids.len())
+        .expect("Failed to initialize per-core sections");
+
+    // Initialize the BSP local APIC
+    let local_apic =
+        apic::LocalApic::init().expect("Failed to initialize local APIC");
+
     ioapic::init_ioapics(&madt).expect("Failed to initialize IOAPICs");
     ioapic::map_gsi_vector(4, interrupt::UART_VECTOR, 0)
         .expect("Failed to map com0 gsi");
 
-    percore::init_sections(apic_ids.len())
-        .expect("Failed to initialize per-core sections");
-
     let mut builder = vm::VirtualMachineBuilder::new();
 
-    for apic_id in apic_ids.iter() {
+    let all_cores: Vec<_> = apic_ids
+        .iter()
+        .map(|apic_id| percore::CoreId::from(apic_id.raw))
+        .collect();
+
+    for (idx, core_pair) in all_cores.chunks(1).into_iter().enumerate() {
         builder
             .insert_machine(default_vm(
-                percore::CoreId::from(apic_id.raw),
+                core_pair.to_vec(),
                 256,
                 &boot_info,
-                apic_id.is_bsp(),
+                idx == 0,
             ))
             .expect("Failed to insert new vm");
     }
